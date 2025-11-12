@@ -7,6 +7,7 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const projectRoot = join(__dirname, "..");
+const publicDir = join(projectRoot, "public");
 const host = process.env.HOST || "0.0.0.0";
 const port = Number.parseInt(process.env.PORT || "5173", 10);
 
@@ -24,17 +25,54 @@ const MIME_TYPES = {
   ".json": "application/json; charset=utf-8",
 };
 
-function resolvePath(urlPath) {
+async function resolveFile(urlPath) {
   if (urlPath === "/") {
-    return join(projectRoot, "index.html");
+    const filePath = join(projectRoot, "index.html");
+    await stat(filePath);
+    return filePath;
   }
 
-  const targetPath = resolve(projectRoot, `.${urlPath}`);
-  if (!targetPath.startsWith(projectRoot)) {
-    return null;
+  const relativePath = `.${urlPath}`;
+  const candidates = [
+    { root: projectRoot, path: resolve(projectRoot, relativePath) },
+    { root: publicDir, path: resolve(publicDir, relativePath) },
+  ];
+
+  let isWithinAllowedRoot = false;
+
+  for (const { root, path } of candidates) {
+    if (!path.startsWith(root)) {
+      continue;
+    }
+
+    isWithinAllowedRoot = true;
+
+    try {
+      let filePath = path;
+      const stats = await stat(path);
+
+      if (stats.isDirectory()) {
+        filePath = join(filePath, "index.html");
+        await stat(filePath);
+      }
+
+      return filePath;
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
+    }
   }
 
-  return targetPath;
+  if (!isWithinAllowedRoot) {
+    const error = new Error("Forbidden");
+    error.code = "FORBIDDEN";
+    throw error;
+  }
+
+  const notFoundError = new Error("Not found");
+  notFoundError.code = "ENOENT";
+  throw notFoundError;
 }
 
 async function sendFile(res, filePath) {
@@ -48,20 +86,15 @@ async function handler(req, res) {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const pathname = decodeURIComponent(url.pathname);
-    let filePath = resolvePath(pathname);
-    if (!filePath) {
+    const filePath = await resolveFile(pathname);
+    await sendFile(res, filePath);
+  } catch (error) {
+    if (error.code === "FORBIDDEN") {
       res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
       res.end("Forbidden");
       return;
     }
 
-    const stats = await stat(filePath);
-    if (stats.isDirectory()) {
-      filePath = join(filePath, "index.html");
-    }
-
-    await sendFile(res, filePath);
-  } catch (error) {
     if (error.code === "ENOENT") {
       res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
       res.end("Not found");
